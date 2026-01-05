@@ -5,6 +5,7 @@ import { Product } from '../types';
 interface Props {
   products: Product[];
   onAddProduct: (product: Product) => void;
+  onUpdateProduct: (product: Product) => void;
   onDeleteProduct: (id: string) => void;
   onClose: () => void;
 }
@@ -12,7 +13,7 @@ interface Props {
 const CATEGORIES = ['Panadería', 'Postres', 'Sin Gluten', 'Sin Lactosa'];
 const ADMIN_PASSWORD = "tahona"; // Hardcoded simple password
 
-const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onDeleteProduct, onClose }) => {
+const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onUpdateProduct, onDeleteProduct, onClose }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [passwordInput, setPasswordInput] = useState("");
   const [loginError, setLoginError] = useState(false);
@@ -68,10 +69,10 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onDeleteProduct, 
             }
           }
 
-          canvas.width = width;
           canvas.height = height;
+          canvas.width = width;
           ctx.drawImage(img, 0, 0, width, height);
-          resolve(canvas.toDataURL('image/jpeg', 0.7)); // Compress to 0.7 quality
+          resolve(canvas.toDataURL('image/jpeg', 0.6)); // Compress to 0.6 quality to save DB space
         };
         img.onerror = reject;
         img.src = event.target?.result as string;
@@ -89,14 +90,20 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onDeleteProduct, 
       const fileCompressions: Promise<string>[] = Array.from(files).map(file => compressImage(file));
 
       Promise.all(fileCompressions).then(base64Images => {
-        // En modo edición, si ya hay imágenes, podemos decidir si reemplazar o añadir
-        // Por simplicidad, reemplazamos si se suben nuevas
-        setImage(base64Images[0]);
+        // Append new images to existing ones (or create new array if empty)
+        const currentImages = (form as any).imagenes || [];
+        const newImagesList = [...currentImages, ...base64Images];
+
+        // Update form state
         setForm(prev => ({
           ...prev,
-          imagenUrl: base64Images[0],
-          imagenes: base64Images
+          imagenUrl: newImagesList[0], // Keep first as main
+          imagenes: newImagesList
         }));
+
+        // Update display image if it was empty
+        if (!image) setImage(base64Images[0]);
+
         setLoadingImage(false);
       }).catch(err => {
         console.error("Error processing images", err);
@@ -108,6 +115,10 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onDeleteProduct, 
 
   const handleEdit = (product: Product) => {
     setEditingId(product.id);
+    const existingImages = product.imagenes && product.imagenes.length > 0
+      ? product.imagenes
+      : (product.imagen ? [product.imagen] : []);
+
     setForm({
       titulo: product.titulo,
       descripcion: product.descripcion,
@@ -115,13 +126,12 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onDeleteProduct, 
       etiqueta: product.etiqueta || '',
       imagenUrl: product.imagen,
       categoria: product.categoria || 'Panadería',
-      ...(product as any) // Spread to include 'imagenes' if present in product object but not in type yet explicitly sometimes
+      ...(product as any)
     });
-    // Ensure form has the images array
-    if ((product as any).imagenes) {
-      (form as any).imagenes = (product as any).imagenes;
-    }
-    setImage(product.imagen);
+
+    // Force set internal form state for images
+    (form as any).imagenes = existingImages;
+    setImage(existingImages[0] || product.imagen);
   };
 
   const handleCancelEdit = () => {
@@ -146,6 +156,12 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onDeleteProduct, 
     const currentOrder = product.orden ?? currentIndex;
     const targetOrder = targetProduct.orden ?? targetIndex;
 
+    // Optimistic / Offline update
+    const updatedProduct = { ...product, orden: targetOrder };
+    const updatedTarget = { ...targetProduct, orden: currentOrder };
+    onUpdateProduct(updatedProduct);
+    onUpdateProduct(updatedTarget);
+
     if (supabase) {
       await supabase.from('products').update({ orden: targetOrder }).eq('id', product.id);
       await supabase.from('products').update({ orden: currentOrder }).eq('id', targetProduct.id);
@@ -156,50 +172,78 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onDeleteProduct, 
   };
 
   const handleSave = async () => {
-    const productData = {
-      ...form,
-      imagen: form.imagenUrl || 'https://picsum.photos/seed/bread/800/600',
-      imagenes: (form as any).imagenes || [form.imagenUrl || 'https://picsum.photos/seed/bread/800/600'],
-      boton: 'Pedir'
-    };
-
-    if (editingId) {
-      // UPDATE
-      if (supabase) {
-        const { error } = await supabase
-          .from('products')
-          .update(productData)
-          .eq('id', editingId);
-
-        if (error) {
-          console.error("Error updating:", error);
-          alert("Error actualizando producto.");
-        } else {
-          window.location.reload(); // Reload to reflect changes
-        }
-      }
-    } else {
-      // CREATE
-      // Optimistic Update (Local)
-      const optimisticProduct: Product = {
-        id: Date.now().toString(),
-        ...productData
-      };
-      onAddProduct(optimisticProduct);
-
-      if (supabase) {
-        const { error } = await supabase
-          .from('products')
-          .insert([productData]);
-
-        if (error) {
-          console.error("Error inserting:", error);
-          alert("Error guardando en la nube.");
-        }
-      }
+    // Validation
+    if (!form.titulo || !form.precio) {
+      alert("Por favor, rellena al menos el título y el precio.");
+      return;
     }
 
-    handleCancelEdit();
+    const imgs = (form as any).imagenes && (form as any).imagenes.length > 0
+      ? (form as any).imagenes
+      : (form.imagenUrl ? [form.imagenUrl] : ['https://picsum.photos/seed/bread/800/600']);
+
+    // Ensure main image is always the first one
+    const mainImg = imgs[0];
+
+    const productData = {
+      ...form,
+      imagen: mainImg,
+      imagenes: imgs,
+      boton: form.boton || 'Pedir'
+    };
+
+    // Clean undefined fields
+    if (productData.etiqueta === undefined) delete (productData as any).etiqueta;
+
+    try {
+      if (editingId) {
+        // UPDATE
+        // 1. Optimistic/Offline
+        const updatedProduct = { id: editingId, ...productData, orden: products.find(p => p.id === editingId)?.orden };
+        onUpdateProduct(updatedProduct as Product);
+
+        // 2. Cloud
+        if (supabase) {
+          const { error } = await supabase
+            .from('products')
+            .update(productData)
+            .eq('id', editingId);
+
+          if (error) throw error;
+
+          alert("✅ Producto actualizado en la nube");
+          window.location.reload();
+        } else {
+          alert("⚠️ Editado solo localmente (Modo Offline)");
+          handleCancelEdit();
+        }
+      } else {
+        // CREATE
+        const optimisticProduct: Product = {
+          id: Date.now().toString(),
+          ...productData
+        };
+        onAddProduct(optimisticProduct);
+
+        if (supabase) {
+          const { error } = await supabase
+            .from('products')
+            .insert([productData]);
+
+          if (error) throw error;
+
+          alert("✅ Producto creado en la nube");
+        } else {
+          alert("⚠️ Creado solo localmente (Modo Offline)");
+        }
+      }
+
+      if (!supabase || !editingId) handleCancelEdit();
+
+    } catch (error: any) {
+      console.error("Supabase Error:", error);
+      alert(`❌ Error al guardar en la base de datos: ${error.message || JSON.stringify(error)}`);
+    }
   };
 
   if (!isAuthenticated) {
@@ -278,9 +322,56 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onDeleteProduct, 
                     <span className="text-xs text-bakery-brown">Procesando imágenes...</span>
                   </div>
                 ) : ((form as any).imagenes && (form as any).imagenes.length > 0) ? (
-                  <div className="grid grid-cols-3 gap-2 w-full">
+                  <div className="grid grid-cols-3 gap-2 w-full p-2">
                     {(form as any).imagenes.map((img: string, idx: number) => (
-                      <img key={idx} src={img} className="w-full h-24 object-cover rounded-lg shadow-sm" alt={`Preview ${idx}`} />
+                      <div key={idx} className="relative group">
+                        <img src={img} className="w-full h-24 object-cover rounded-lg shadow-sm" alt={`Preview ${idx}`} />
+                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-lg flex items-center justify-center gap-1">
+                          {idx > 0 && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const newImages = [...(form as any).imagenes];
+                                [newImages[idx - 1], newImages[idx]] = [newImages[idx], newImages[idx - 1]];
+                                setForm({ ...form, imagenes: newImages } as any);
+                                if (idx === 0) setImage(newImages[0]); // Update main image if first changed
+                              }}
+                              className="bg-white/90 p-1 rounded-full hover:bg-white text-xs"
+                              title="Mover izquierda"
+                            >
+                              ⬅️
+                            </button>
+                          )}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const newImages = (form as any).imagenes.filter((_: any, i: number) => i !== idx);
+                              setForm({ ...form, imagenes: newImages } as any);
+                              if (newImages.length > 0) setImage(newImages[0]);
+                              else setImage(null);
+                            }}
+                            className="bg-red-500/90 p-1 rounded-full hover:bg-red-600 text-white text-xs"
+                            title="Eliminar foto"
+                          >
+                            🗑️
+                          </button>
+                          {idx < (form as any).imagenes.length - 1 && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const newImages = [...(form as any).imagenes];
+                                [newImages[idx], newImages[idx + 1]] = [newImages[idx + 1], newImages[idx]];
+                                setForm({ ...form, imagenes: newImages } as any);
+                                if (idx === 0) setImage(newImages[0]);
+                              }}
+                              className="bg-white/90 p-1 rounded-full hover:bg-white text-xs"
+                              title="Mover derecha"
+                            >
+                              ➡️
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     ))}
                   </div>
                 ) : image ? (

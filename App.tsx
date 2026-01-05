@@ -95,6 +95,15 @@ const App: React.FC = () => {
     setTimeout(() => alert("✅ Producto añadido correctamente."), 100);
   };
 
+  const handleUpdateProduct = (updatedProduct: Product) => {
+    setProducts(prev => {
+      const updated = prev.map(p => p.id === updatedProduct.id ? updatedProduct : p);
+      saveToStorage(updated);
+      return updated;
+    });
+    setTimeout(() => alert("✅ Producto actualizado (Localmente)."), 100);
+  };
+
   const handleDeleteProduct = (productId: string) => {
     if (window.confirm("¿Estás seguro de que quieres borrar este producto?")) {
       setProducts(prev => {
