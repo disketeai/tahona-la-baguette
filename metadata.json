@@ -1,0 +1,7 @@
+{
+  "name": "Tahona La Baguette",
+  "description": "A premium artisanal bakery website with dynamic catalog management via Google Sheets and an AI-powered customer assistant.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
