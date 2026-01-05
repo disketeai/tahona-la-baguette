@@ -38,26 +38,59 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onDeleteProduct, 
     }
   };
 
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  const compressImage = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return reject('No canvas context');
+
+          // Max dimensions
+          const MAX_WIDTH = 800;
+          const MAX_HEIGHT = 800;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_WIDTH) {
+              height *= MAX_WIDTH / width;
+              width = MAX_WIDTH;
+            }
+          } else {
+            if (height > MAX_HEIGHT) {
+              width *= MAX_HEIGHT / height;
+              height = MAX_HEIGHT;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+          ctx.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', 0.7)); // Compress to 0.7 quality
+        };
+        img.onerror = reject;
+        img.src = event.target?.result as string;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (files && files.length > 0) {
       setLoadingImage(true);
-      // Convertir todos los archivos a Base64
-      const fileReaders: Promise<string>[] = [];
 
-      Array.from(files).forEach(file => {
-        fileReaders.push(new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            resolve(reader.result as string);
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        }));
-      });
+      const fileCompressions: Promise<string>[] = Array.from(files).map(file => compressImage(file));
 
-      Promise.all(fileReaders).then(base64Images => {
-        // La primera imagen sigue siendo la principal para retrocompatibilidad
+      Promise.all(fileCompressions).then(base64Images => {
+        // En modo edición, si ya hay imágenes, podemos decidir si reemplazar o añadir
+        // Por simplicidad, reemplazamos si se suben nuevas
         setImage(base64Images[0]);
         setForm(prev => ({
           ...prev,
@@ -66,10 +99,36 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onDeleteProduct, 
         }));
         setLoadingImage(false);
       }).catch(err => {
-        console.error("Error reading files", err);
+        console.error("Error processing images", err);
         setLoadingImage(false);
+        alert("Error al procesar las imágenes.");
       });
     }
+  };
+
+  const handleEdit = (product: Product) => {
+    setEditingId(product.id);
+    setForm({
+      titulo: product.titulo,
+      descripcion: product.descripcion,
+      precio: product.precio,
+      etiqueta: product.etiqueta || '',
+      imagenUrl: product.imagen,
+      categoria: product.categoria || 'Panadería',
+      ...(product as any) // Spread to include 'imagenes' if present in product object but not in type yet explicitly sometimes
+    });
+    // Ensure form has the images array
+    if ((product as any).imagenes) {
+      (form as any).imagenes = (product as any).imagenes;
+    }
+    setImage(product.imagen);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingId(null);
+    setForm({ titulo: '', descripcion: '', precio: '', etiqueta: '', imagenUrl: '', categoria: 'Panadería' });
+    setImage(null);
+    (form as any).imagenes = [];
   };
 
   const handleMove = async (e: React.MouseEvent, product: Product, direction: 'up' | 'down') => {
@@ -96,36 +155,51 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onDeleteProduct, 
     }
   };
 
-  const handleAdd = async () => {
-    const newProductData = {
+  const handleSave = async () => {
+    const productData = {
       ...form,
       imagen: form.imagenUrl || 'https://picsum.photos/seed/bread/800/600',
-      imagenes: (form as any).imagenes || [form.imagenUrl || 'https://picsum.photos/seed/bread/800/600'], // Fallback a array con 1 foto
+      imagenes: (form as any).imagenes || [form.imagenUrl || 'https://picsum.photos/seed/bread/800/600'],
       boton: 'Pedir'
     };
 
-    // Optimistic Update (Local)
-    const optimisticProduct: Product = {
-      id: Date.now().toString(),
-      ...newProductData
-    };
-    onAddProduct(optimisticProduct);
+    if (editingId) {
+      // UPDATE
+      if (supabase) {
+        const { error } = await supabase
+          .from('products')
+          .update(productData)
+          .eq('id', editingId);
 
-    // Supabase Insert
-    if (supabase) {
-      const { error } = await supabase
-        .from('products')
-        .insert([newProductData]);
+        if (error) {
+          console.error("Error updating:", error);
+          alert("Error actualizando producto.");
+        } else {
+          window.location.reload(); // Reload to reflect changes
+        }
+      }
+    } else {
+      // CREATE
+      // Optimistic Update (Local)
+      const optimisticProduct: Product = {
+        id: Date.now().toString(),
+        ...productData
+      };
+      onAddProduct(optimisticProduct);
 
-      if (error) {
-        console.error("Error inserting into Supabase:", error);
-        alert("Error guardando en la nube. Se guardará solo localmente.");
+      if (supabase) {
+        const { error } = await supabase
+          .from('products')
+          .insert([productData]);
+
+        if (error) {
+          console.error("Error inserting:", error);
+          alert("Error guardando en la nube.");
+        }
       }
     }
 
-    // Reiniciar form
-    setForm({ titulo: '', descripcion: '', precio: '', etiqueta: '', imagenUrl: '', categoria: 'Panadería' });
-    setImage(null);
+    handleCancelEdit();
   };
 
   if (!isAuthenticated) {
@@ -188,8 +262,8 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onDeleteProduct, 
           {/* Columna Izquierda: Añadir Producto */}
           <div className="p-6 overflow-y-auto border-r border-gray-100 bg-gray-50/50">
             <h3 className="text-lg font-bold text-bakery-brown mb-4 flex items-center gap-2">
-              <span className="w-8 h-8 bg-bakery-gold text-white rounded-full flex items-center justify-center text-sm">1</span>
-              Añadir Nuevo Producto
+              <span className="w-8 h-8 bg-bakery-gold text-white rounded-full flex items-center justify-center text-sm">{editingId ? '✏️' : '1'}</span>
+              {editingId ? 'Editar Producto' : 'Añadir Nuevo Producto'}
             </h3>
 
             <div className="space-y-4">
@@ -279,13 +353,23 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onDeleteProduct, 
                 />
               </div>
 
-              <button
-                onClick={handleAdd}
-                disabled={!form.titulo || !form.precio || loadingImage}
-                className="w-full mt-4 bg-bakery-brown text-white py-3 rounded-xl font-bold hover:bg-bakery-gold transition shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                + Añadir al Catálogo
-              </button>
+              <div className="flex gap-2 mt-4">
+                {editingId && (
+                  <button
+                    onClick={handleCancelEdit}
+                    className="flex-1 bg-gray-200 text-gray-700 py-3 rounded-xl font-bold hover:bg-gray-300 transition"
+                  >
+                    Cancelar
+                  </button>
+                )}
+                <button
+                  onClick={handleSave}
+                  disabled={!form.titulo || !form.precio || loadingImage}
+                  className={`flex-1 bg-bakery-brown text-white py-3 rounded-xl font-bold hover:bg-bakery-gold transition shadow-lg disabled:opacity-50 disabled:cursor-not-allowed`}
+                >
+                  {editingId ? 'Guardar Cambios' : '+ Añadir al Catálogo'}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -330,19 +414,33 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onDeleteProduct, 
                         ▼
                       </button>
                     </div>
-                    <button
-                      onClick={async (e) => {
-                        e.stopPropagation();
-                        onDeleteProduct(product.id);
-                        if (supabase) {
-                          await supabase.from('products').delete().eq('id', product.id);
-                        }
-                      }}
-                      className="text-gray-400 hover:text-red-600 bg-transparent hover:bg-red-50 p-2 rounded-lg transition-all"
-                      title="Eliminar producto"
-                    >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                    </button>
+                    <div className="flex flex-col gap-1 mr-2">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleEdit(product);
+                        }}
+                        className="text-gray-400 hover:text-bakery-gold bg-transparent hover:bg-orange-50 p-2 rounded-lg transition-all mb-1"
+                        title="Editar producto"
+                      >
+                        ✏️
+                      </button>
+                      <button
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          if (confirm('¿Seguro que quieres eliminar este producto?')) {
+                            onDeleteProduct(product.id);
+                            if (supabase) {
+                              await supabase.from('products').delete().eq('id', product.id);
+                            }
+                          }
+                        }}
+                        className="text-gray-400 hover:text-red-600 bg-transparent hover:bg-red-50 p-2 rounded-lg transition-all"
+                        title="Eliminar producto"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                      </button>
+                    </div>
                   </div>
                 ))
               )}
