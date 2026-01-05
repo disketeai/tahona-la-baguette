@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-// Deploy trigger: 2026-01-05 15:56
+// Final build trigger with correct Supabase Anon Key: 2026-01-05 16:08
 import Navbar from './components/Navbar';
 import Hero from './components/Hero';
 import ProductCard from './components/ProductCard';
