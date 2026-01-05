@@ -2,12 +2,15 @@
 export interface Product {
   id: string;
   titulo: string;
-  imagen: string;
-  etiqueta?: string;
   descripcion: string;
   precio: string;
+  etiqueta?: string | null;
+  imagen: string;
+  categoria: string;
   boton?: string;
-  categoria?: string;
+  // New fields
+  orden?: number;
+  imagenes?: string[];
 }
 
 export interface ChatMessage {

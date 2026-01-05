@@ -12,6 +12,7 @@ import { Product } from './types';
 import { LegalPageType } from './data/legalContent';
 import { APP_CONFIG, MOCK_PRODUCTS } from './constants';
 import { fetchProductsFromSheet } from './services/csvService';
+import { supabase } from './lib/supabase';
 
 const STORAGE_KEY = 'tahona_products_data';
 
@@ -27,7 +28,25 @@ const App: React.FC = () => {
   useEffect(() => {
     const loadData = async () => {
       try {
-        // 1. Intentar cargar desde LocalStorage primero (persistencia de cambios)
+        setLoading(true);
+
+        // 1. Intentar cargar desde Supabase (Si está configurado)
+        if (supabase) {
+          const { data, error } = await supabase
+            .from('products')
+            .select('*')
+            .order('orden', { ascending: true }); // Ordered by custom order
+
+          if (error) throw error;
+
+          if (data) {
+            setProducts(data);
+            setLoading(false);
+            return;
+          }
+        }
+
+        // 2. Fallback: LocalStorage (persistencia local si no hay DB)
         const savedData = localStorage.getItem(STORAGE_KEY);
         if (savedData) {
           setProducts(JSON.parse(savedData));
@@ -35,7 +54,7 @@ const App: React.FC = () => {
           return;
         }
 
-        // 2. Si no hay datos locales, intentar cargar desde CSV o Mock
+        // 3. Fallback: CSV o Mock
         if (APP_CONFIG.sheetUrl) {
           const sheetProducts = await fetchProductsFromSheet(APP_CONFIG.sheetUrl);
           const finalProducts = sheetProducts.length > 0 ? sheetProducts : MOCK_PRODUCTS;
@@ -44,9 +63,11 @@ const App: React.FC = () => {
           setProducts(MOCK_PRODUCTS);
         }
       } catch (err) {
-        console.error("Error loading CSV:", err);
-        setError("No pudimos conectar con el catálogo en vivo. Mostrando productos destacados.");
-        setProducts(MOCK_PRODUCTS);
+        console.error("Error loading data:", err);
+        setError("Error conectando con la base de datos. Mostrando modo offline.");
+        // Fallback a mock en caso de error de conexión
+        const savedData = localStorage.getItem(STORAGE_KEY);
+        setProducts(savedData ? JSON.parse(savedData) : MOCK_PRODUCTS);
       } finally {
         setLoading(false);
       }
@@ -55,13 +76,12 @@ const App: React.FC = () => {
     loadData();
   }, []);
 
-  // Función auxiliar para guardar con manejo de errores (Quota)
+  // Función auxiliar para guardar (Solo LocalStorage como backup local, la escritura real va en AdminPanel)
   const saveToStorage = (updatedProducts: Product[]) => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedProducts));
     } catch (e) {
       console.error("Error guardando en local:", e);
-      alert("⚠️ Alerta de Memoria: No se pudieron guardar los cambios permanentemente. Es probable que hayas subido demasiadas imágenes o muy grandes. Intenta borrar algunos productos antiguos.");
     }
   };
 
