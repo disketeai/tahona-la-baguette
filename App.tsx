@@ -33,24 +33,53 @@ const App: React.FC = () => {
 
         // 1. Intentar cargar desde Supabase (Si está configurado)
         if (supabase) {
-          const { data, error } = await supabase
-            .from('products')
-            .select('*')
-            .order('orden', { ascending: true }); // Ordered by custom order
+          try {
+            // Try to fetch with 'orden' column first
+            const { data, error } = await supabase
+              .from('products')
+              .select('*')
+              .order('orden', { ascending: true }); // Ordered by custom order
 
-          if (error) throw error;
+            if (error) {
+              // If orden column doesn't exist, try without ordering or with created_at
+              if (error.code === '42703') {
+                console.warn('⚠️ Column "orden" not found, fetching without ordering...');
+                const fallbackQuery = await supabase
+                  .from('products')
+                  .select('*')
+                  .order('created_at', { ascending: false });
 
-          if (data) {
-            setProducts(data);
-            setLoading(false);
-            return;
+                if (fallbackQuery.error) throw fallbackQuery.error;
+                if (fallbackQuery.data) {
+                  setProducts(fallbackQuery.data);
+                  setError("⚠️ Nota: La base de datos necesita actualización (falta columna 'orden'). Ver URGENT_FIX.md");
+                  setLoading(false);
+                  return;
+                }
+              } else {
+                throw error;
+              }
+            }
+
+            if (data) {
+              setProducts(data);
+              setLoading(false);
+              return;
+            }
+          } catch (supabaseError) {
+            console.error("Supabase error:", supabaseError);
+            throw supabaseError;
           }
         }
 
         // 2. Fallback: LocalStorage (persistencia local si no hay DB)
         const savedData = localStorage.getItem(STORAGE_KEY);
         if (savedData) {
-          setProducts(JSON.parse(savedData));
+          const products = JSON.parse(savedData);
+          const sorted = Array.isArray(products)
+            ? [...products].sort((a, b) => (a.orden || 0) - (b.orden || 0))
+            : [];
+          setProducts(sorted);
           setLoading(false);
           return;
         }
@@ -59,9 +88,11 @@ const App: React.FC = () => {
         if (APP_CONFIG.sheetUrl) {
           const sheetProducts = await fetchProductsFromSheet(APP_CONFIG.sheetUrl);
           const finalProducts = sheetProducts.length > 0 ? sheetProducts : MOCK_PRODUCTS;
-          setProducts(finalProducts);
+          const sorted = [...finalProducts].sort((a, b) => (a.orden || 0) - (b.orden || 0));
+          setProducts(sorted);
         } else {
-          setProducts(MOCK_PRODUCTS);
+          const sorted = [...MOCK_PRODUCTS].sort((a, b) => (a.orden || 0) - (b.orden || 0));
+          setProducts(sorted);
         }
       } catch (err) {
         console.error("Error loading data:", err);
@@ -99,10 +130,11 @@ const App: React.FC = () => {
   const handleUpdateProduct = (updatedProduct: Product) => {
     setProducts(prev => {
       const updated = prev.map(p => p.id === updatedProduct.id ? updatedProduct : p);
-      saveToStorage(updated);
-      return updated;
+      // Sort by orden if available
+      const sorted = [...updated].sort((a, b) => (a.orden || 0) - (b.orden || 0));
+      saveToStorage(sorted);
+      return sorted;
     });
-    setTimeout(() => alert("✅ Producto actualizado (Localmente)."), 100);
   };
 
   const handleDeleteProduct = (productId: string) => {
@@ -173,7 +205,7 @@ const App: React.FC = () => {
               ) : (
                 <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-10 max-w-6xl mx-auto">
                   {filteredProducts.map(product => (
-                    <ProductCard key={product.id} product={product} />
+                    <ProductCard key={product.id} {...product} />
                   ))}
                 </div>
               )}
@@ -256,6 +288,7 @@ const App: React.FC = () => {
         <AdminPanel
           products={products}
           onAddProduct={handleAddLocalProduct}
+          onUpdateProduct={handleUpdateProduct}
           onDeleteProduct={handleDeleteProduct}
           onClose={() => setIsAdminOpen(false)}
         />

@@ -20,12 +20,13 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onUpdateProduct, 
 
   const [image, setImage] = useState<string | null>(null);
   const [loadingImage, setLoadingImage] = useState(false);
-  const [form, setForm] = useState({
+  const [form, setForm] = useState<Partial<Product>>({
     titulo: '',
     descripcion: '',
     precio: '',
     etiqueta: '',
-    imagenUrl: '',
+    imagen: '',
+    imagenes: [],
     categoria: 'Panadería'
   });
 
@@ -51,7 +52,7 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onUpdateProduct, 
           const ctx = canvas.getContext('2d');
           if (!ctx) return reject('No canvas context');
 
-          // Max dimensions
+          // Dimensiones máximas para no saturar la DB
           const MAX_WIDTH = 800;
           const MAX_HEIGHT = 800;
           let width = img.width;
@@ -72,7 +73,7 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onUpdateProduct, 
           canvas.height = height;
           canvas.width = width;
           ctx.drawImage(img, 0, 0, width, height);
-          resolve(canvas.toDataURL('image/jpeg', 0.6)); // Compress to 0.6 quality to save DB space
+          resolve(canvas.toDataURL('image/jpeg', 0.6));
         };
         img.onerror = reject;
         img.src = event.target?.result as string;
@@ -85,25 +86,29 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onUpdateProduct, 
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (files && files.length > 0) {
-      setLoadingImage(true);
+      const currentImages = form.imagenes || [];
 
-      const fileCompressions: Promise<string>[] = Array.from(files).map(file => compressImage(file));
+      if (currentImages.length >= 3) {
+        alert("Máximo 3 fotos por producto.");
+        return;
+      }
+
+      setLoadingImage(true);
+      const remainingSlots = 3 - currentImages.length;
+      const filesToProcess = Array.from(files).slice(0, remainingSlots);
+
+      const fileCompressions: Promise<string>[] = filesToProcess.map(file => compressImage(file));
 
       Promise.all(fileCompressions).then(base64Images => {
-        // Append new images to existing ones (or create new array if empty)
-        const currentImages = (form as any).imagenes || [];
         const newImagesList = [...currentImages, ...base64Images];
 
-        // Update form state
         setForm(prev => ({
           ...prev,
-          imagenUrl: newImagesList[0], // Keep first as main
+          imagen: newImagesList[0],
           imagenes: newImagesList
         }));
 
-        // Update display image if it was empty
-        if (!image) setImage(base64Images[0]);
-
+        setImage(newImagesList[0]);
         setLoadingImage(false);
       }).catch(err => {
         console.error("Error processing images", err);
@@ -124,21 +129,26 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onUpdateProduct, 
       descripcion: product.descripcion,
       precio: product.precio,
       etiqueta: product.etiqueta || '',
-      imagenUrl: product.imagen,
+      imagen: product.imagen,
+      imagenes: existingImages,
       categoria: product.categoria || 'Panadería',
-      ...(product as any)
     });
 
-    // Force set internal form state for images
-    (form as any).imagenes = existingImages;
     setImage(existingImages[0] || product.imagen);
   };
 
   const handleCancelEdit = () => {
     setEditingId(null);
-    setForm({ titulo: '', descripcion: '', precio: '', etiqueta: '', imagenUrl: '', categoria: 'Panadería' });
+    setForm({
+      titulo: '',
+      descripcion: '',
+      precio: '',
+      etiqueta: '',
+      imagen: '',
+      imagenes: [],
+      categoria: 'Panadería'
+    });
     setImage(null);
-    (form as any).imagenes = [];
   };
 
   const handleMove = async (e: React.MouseEvent, product: Product, direction: 'up' | 'down') => {
@@ -153,56 +163,69 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onUpdateProduct, 
     const targetProduct = products[targetIndex];
     if (!targetProduct) return;
 
-    const currentOrder = product.orden ?? currentIndex;
-    const targetOrder = targetProduct.orden ?? targetIndex;
+    // Use current orders or fallback to indices
+    const currentOrder = product.orden ?? (currentIndex + 1);
+    const targetOrder = targetProduct.orden ?? (targetIndex + 1);
 
-    // Optimistic / Offline update
-    const updatedProduct = { ...product, orden: targetOrder };
+    // If orders are the same, we need to re-initialize them
+    const newCurrentOrder = targetOrder;
+    const newTargetOrder = currentOrder;
+
+    // IMPORTANT: If they were equal, just swap them by the new target index
+    const finalizedCurrentOrder = newCurrentOrder === newTargetOrder ? (direction === 'up' ? currentOrder - 1 : currentOrder + 1) : newCurrentOrder;
+
+    // Optimistic / Offline update - update local state first
+    const updatedProduct = { ...product, orden: finalizedCurrentOrder };
     const updatedTarget = { ...targetProduct, orden: currentOrder };
+
     onUpdateProduct(updatedProduct);
     onUpdateProduct(updatedTarget);
 
+    // Async update to Supabase
     if (supabase) {
-      await supabase.from('products').update({ orden: targetOrder }).eq('id', product.id);
-      await supabase.from('products').update({ orden: currentOrder }).eq('id', targetProduct.id);
-      // We should ideally reload data here, but for now we rely on page reload or optimistic updates in a real app
-      // A quick hack for this demo: reload page
-      window.location.reload();
+      try {
+        await Promise.all([
+          supabase.from('products').update({ orden: finalizedCurrentOrder }).eq('id', product.id),
+          supabase.from('products').update({ orden: currentOrder }).eq('id', targetProduct.id)
+        ]);
+      } catch (err) {
+        console.error("Error updating order in Supabase:", err);
+      }
     }
   };
 
   const handleSave = async () => {
-    // Validation
     if (!form.titulo || !form.precio) {
       alert("Por favor, rellena al menos el título y el precio.");
       return;
     }
 
-    const imgs = (form as any).imagenes && (form as any).imagenes.length > 0
-      ? (form as any).imagenes
-      : (form.imagenUrl ? [form.imagenUrl] : ['https://picsum.photos/seed/bread/800/600']);
-
-    // Ensure main image is always the first one
-    const mainImg = imgs[0];
+    const imgs = form.imagenes && form.imagenes.length > 0
+      ? form.imagenes
+      : (form.imagen ? [form.imagen] : ['https://images.unsplash.com/photo-1509440159596-0249088772ff?w=500']);
 
     const productData = {
-      ...form,
-      imagen: mainImg,
-      imagenes: imgs,
-      boton: form.boton || 'Pedir'
+      titulo: form.titulo,
+      descripcion: form.descripcion,
+      precio: form.precio,
+      categoria: form.categoria || 'Panadería',
+      etiqueta: form.etiqueta || '',
+      imagen: imgs[0],
+      imagenes: imgs.slice(0, 3), // Forzar máximo 3
+      boton: 'Pedir'
     };
-
-    // Clean undefined fields
-    if (productData.etiqueta === undefined) delete (productData as any).etiqueta;
 
     try {
       if (editingId) {
-        // UPDATE
-        // 1. Optimistic/Offline
-        const updatedProduct = { id: editingId, ...productData, orden: products.find(p => p.id === editingId)?.orden };
+        // ACTUALIZAR
+        const currentProduct = products.find(p => p.id === editingId);
+        const updatedProduct = {
+          ...currentProduct,
+          ...productData,
+          id: editingId
+        };
         onUpdateProduct(updatedProduct as Product);
 
-        // 2. Cloud
         if (supabase) {
           const { error } = await supabase
             .from('products')
@@ -210,39 +233,35 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onUpdateProduct, 
             .eq('id', editingId);
 
           if (error) throw error;
-
-          alert("✅ Producto actualizado en la nube");
+          alert("✅ Guardado en la nube");
           window.location.reload();
         } else {
-          alert("⚠️ Editado solo localmente (Modo Offline)");
+          alert("⚠️ Guardado localmente (Offline)");
           handleCancelEdit();
         }
       } else {
-        // CREATE
-        const optimisticProduct: Product = {
-          id: Date.now().toString(),
-          ...productData
-        };
-        onAddProduct(optimisticProduct);
-
+        // CREAR NUEVO
         if (supabase) {
           const { error } = await supabase
             .from('products')
             .insert([productData]);
 
           if (error) throw error;
-
-          alert("✅ Producto creado en la nube");
+          alert("✅ Creado en la nube");
+          window.location.reload();
         } else {
-          alert("⚠️ Creado solo localmente (Modo Offline)");
+          const optimisticProduct: Product = {
+            id: Date.now().toString(),
+            ...productData as any
+          };
+          onAddProduct(optimisticProduct);
+          alert("⚠️ Creado localmente (Offline)");
+          handleCancelEdit();
         }
       }
-
-      if (!supabase || !editingId) handleCancelEdit();
-
     } catch (error: any) {
-      console.error("Supabase Error:", error);
-      alert(`❌ Error al guardar en la base de datos: ${error.message || JSON.stringify(error)}`);
+      console.error("Error:", error);
+      alert(`❌ Error: ${error.message}`);
     }
   };
 
@@ -319,11 +338,11 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onUpdateProduct, 
                 {loadingImage ? (
                   <div className="flex flex-col items-center">
                     <div className="w-8 h-8 border-4 border-bakery-gold border-t-transparent rounded-full animate-spin mb-2"></div>
-                    <span className="text-xs text-bakery-brown">Procesando imágenes...</span>
+                    <span className="text-xs text-bakery-brown">Procesando...</span>
                   </div>
-                ) : ((form as any).imagenes && (form as any).imagenes.length > 0) ? (
+                ) : (form.imagenes && form.imagenes.length > 0) ? (
                   <div className="grid grid-cols-3 gap-2 w-full p-2">
-                    {(form as any).imagenes.map((img: string, idx: number) => (
+                    {form.imagenes.map((img: string, idx: number) => (
                       <div key={idx} className="relative group">
                         <img src={img} className="w-full h-24 object-cover rounded-lg shadow-sm" alt={`Preview ${idx}`} />
                         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-lg flex items-center justify-center gap-1">
@@ -478,8 +497,11 @@ const AdminPanel: React.FC<Props> = ({ products, onAddProduct, onUpdateProduct, 
                 products.map((product) => (
                   <div key={product.id} className="flex items-center gap-3 p-3 border border-gray-100 rounded-xl hover:shadow-md transition bg-white group relative">
                     <img
-                      src={product.imagen}
+                      src={product.imagen || 'https://images.unsplash.com/photo-1509440159596-0249088772ff?w=100'}
                       alt={product.titulo}
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).src = 'https://images.unsplash.com/photo-1509440159596-0249088772ff?w=100';
+                      }}
                       className="w-12 h-12 object-cover rounded-lg bg-gray-100"
                     />
                     <div className="flex-1 min-w-0">

@@ -9,6 +9,8 @@ create table products (
   etiqueta text,
   categoria text not null,
   imagen text,
+  imagenes text[] default '{}',
+  orden serial,
   boton text default 'Pedir'
 );
 

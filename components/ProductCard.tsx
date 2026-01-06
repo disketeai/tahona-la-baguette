@@ -42,8 +42,11 @@ const ProductCard: React.FC<Product> = ({ titulo, descripcion, precio, imagen, i
           </>
         )}
         <img
-          src={gallery[currentImageIndex]}
+          src={gallery[currentImageIndex] || 'https://images.unsplash.com/photo-1509440159596-0249088772ff?w=500'}
           alt={titulo}
+          onError={(e) => {
+            (e.target as HTMLImageElement).src = 'https://images.unsplash.com/photo-1509440159596-0249088772ff?w=500';
+          }}
           className="w-full h-full object-cover transform group-hover:scale-110 transition-transform duration-700"
         />
         <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-80" />
